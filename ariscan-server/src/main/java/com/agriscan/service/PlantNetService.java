@@ -1,9 +1,11 @@
 package com.agriscan.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
@@ -21,21 +23,23 @@ public class PlantNetService {
     @Value("${plantnet.api-key}")
     private String apiKey;
 
+    @Value("${plantnet.base-url}")
+    private String baseUrl;
+
+    @Value("${plantnet.identify-path}")
+    private String identifyPath;
+
+    @Value("${plantnet.disease-path}")
+    private String diseasePath;
+
     private final ObjectMapper objectMapper;
-
-    private static final String BASE_URL  = "https://my-api.plantnet.org/v2";
-    private static final String IDENTIFY  = "/identify/all";
-    private static final String DISEASE   = "/diseases/identify";
-
-    // ─Main method called by DetectionService 
 
     public PlantNetResult analyze(MultipartFile image) {
         try {
             byte[] imageBytes = image.getBytes();
-            String cropName   = identifyPlant(imageBytes,
-                                              image.getOriginalFilename());
-            DiseaseResult disease = identifyDisease(imageBytes,
-                                                    image.getOriginalFilename());
+            String cropName   = identifyPlant(imageBytes, image.getOriginalFilename());
+            DiseaseResult disease = identifyDisease(imageBytes, image.getOriginalFilename());
+
             return PlantNetResult.builder()
                 .cropType(cropName)
                 .diseaseName(disease.name())
@@ -50,11 +54,10 @@ public class PlantNetService {
         }
     }
 
-    //  Step 1: identify plant species 
-
     private String identifyPlant(byte[] imageBytes, String filename) {
         try {
-            String url = BASE_URL + IDENTIFY + "?api-key=" + apiKey
+            String url = baseUrl + identifyPath
+                       + "?api-key=" + apiKey
                        + "&organs=leaf&lang=en&nb-results=1";
 
             MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
@@ -69,10 +72,8 @@ public class PlantNetService {
 
             JsonNode root    = objectMapper.readTree(response);
             JsonNode results = root.path("results");
-
             if (results.isEmpty()) return "Unknown";
 
-            // commonNames first, fall back to scientific name
             JsonNode species     = results.get(0).path("species");
             JsonNode commonNames = species.path("commonNames");
 
@@ -87,11 +88,10 @@ public class PlantNetService {
         }
     }
 
-    // ── Step 2: identify disease 
-
     private DiseaseResult identifyDisease(byte[] imageBytes, String filename) {
         try {
-            String url = BASE_URL + DISEASE + "?api-key=" + apiKey
+            String url = baseUrl + diseasePath
+                       + "?api-key=" + apiKey
                        + "&nb-results=1&lang=en";
 
             MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
@@ -114,8 +114,6 @@ public class PlantNetService {
             JsonNode top      = results.get(0);
             String name       = top.path("label").asText("Unknown");
             double confidence = top.path("score").asDouble(0.0);
-
-            // category is first element of categories array
             JsonNode cats     = top.path("categories");
             String category   = cats.isEmpty() ? "" : cats.get(0).asText();
 
@@ -126,8 +124,6 @@ public class PlantNetService {
             return new DiseaseResult("Unknown", "", 0.0);
         }
     }
-
-    //  Result types 
 
     @lombok.Builder
     @lombok.Data
@@ -150,9 +146,6 @@ public class PlantNetService {
     }
 
     private record DiseaseResult(String name, String category, double confidence) {}
-
-    // Helper: ByteArrayResource with a filename 
- 
 
     private static class NamedByteArrayResource extends ByteArrayResource {
         private final String filename;
