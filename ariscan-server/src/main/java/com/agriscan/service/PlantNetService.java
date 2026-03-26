@@ -3,9 +3,8 @@ package com.agriscan.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
@@ -26,49 +25,40 @@ public class PlantNetService {
     @Value("${plantnet.base-url}")
     private String baseUrl;
 
-    @Value("${plantnet.identify-path}")
-    private String identifyPath;
-
-    @Value("${plantnet.disease-path}")
-    private String diseasePath;
-
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public PlantNetResult analyze(MultipartFile image) {
         try {
             byte[] imageBytes = image.getBytes();
-            String cropName   = identifyPlant(imageBytes, image.getOriginalFilename());
-            DiseaseResult disease = identifyDisease(imageBytes, image.getOriginalFilename());
+            String filename   = image.getOriginalFilename();
+
+            String    cropName = identifyPlant(imageBytes, filename);
+            DiseaseResult dis  = identifyDisease(imageBytes, filename);
 
             return PlantNetResult.builder()
                 .cropType(cropName)
-                .diseaseName(disease.name())
-                .diseaseCategory(disease.category())
-                .confidence(disease.confidence())
-                .isHealthy(disease.confidence() < 0.2)
+                .diseaseName(dis.name())
+                .diseaseCategory(dis.category())
+                .description(dis.description())
+                .confidence(dis.confidence())
+                .isHealthy(dis.confidence() < 0.2)
                 .build();
 
         } catch (Exception e) {
-            log.error("PlantNet API call failed: {}", e.getMessage());
+            log.error("PlantNet analysis failed: {}", e.getMessage());
             return PlantNetResult.unknown();
         }
     }
 
+    // ── 1. Identify crop/plant species ────────────────────────
     private String identifyPlant(byte[] imageBytes, String filename) {
         try {
-            String url = baseUrl + identifyPath
-                       + "?api-key=" + apiKey
-                       + "&organs=leaf&lang=en&nb-results=1";
+            // organs=leaf tells PlantNet this is a leaf image
+            String url = baseUrl + "/identify/all"
+                + "?api-key=" + apiKey
+                + "&organs=leaf&lang=en&nb-results=1";
 
-            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-            body.add("images", new NamedByteArrayResource(imageBytes, filename));
-
-            String response = RestClient.create()
-                .post().uri(url)
-                .contentType(MediaType.MULTIPART_FORM_DATA)
-                .body(body)
-                .retrieve()
-                .body(String.class);
+            String response = postImage(url, imageBytes, filename);
 
             JsonNode root    = objectMapper.readTree(response);
             JsonNode results = root.path("results");
@@ -88,42 +78,78 @@ public class PlantNetService {
         }
     }
 
+    // ── 2. Identify disease ───────────────────────────────────
     private DiseaseResult identifyDisease(byte[] imageBytes, String filename) {
         try {
-            String url = baseUrl + diseasePath
-                       + "?api-key=" + apiKey
-                       + "&nb-results=1&lang=en";
+            String url = baseUrl + "/diseases/identify"
+                + "?api-key=" + apiKey
+                + "&nb-results=1&lang=en&no-reject=true";
 
-            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-            body.add("images", new NamedByteArrayResource(imageBytes, filename));
-
-            String response = RestClient.create()
-                .post().uri(url)
-                .contentType(MediaType.MULTIPART_FORM_DATA)
-                .body(body)
-                .retrieve()
-                .body(String.class);
+            String response = postImage(url, imageBytes, filename);
+            log.debug("PlantNet disease raw response: {}", response);
 
             JsonNode root    = objectMapper.readTree(response);
             JsonNode results = root.path("results");
 
             if (results.isEmpty()) {
-                return new DiseaseResult("Healthy", "", 0.0);
+            	return new DiseaseResult("Healthy", "Healthy", "", 0.0);
             }
 
-            JsonNode top      = results.get(0);
-            String name       = top.path("label").asText("Unknown");
-            double confidence = top.path("score").asDouble(0.0);
-            JsonNode cats     = top.path("categories");
-            String category   = cats.isEmpty() ? "" : cats.get(0).asText();
+            JsonNode top = results.get(0);
 
-            return new DiseaseResult(name, category, confidence);
+            // "description" = human-readable disease name e.g. "Aphis sp."
+            // "name"        = EPPO code e.g. "APHISP"
+            String description = top.path("description").asText("");
+            String eppoCode    = top.path("name").asText("Unknown");
+            double confidence  = top.path("score").asDouble(0.0);
+
+            // Use description if available, otherwise EPPO code
+            String diseaseName = !description.isBlank() ? description : eppoCode;
+
+            // Derive a simple category from the description
+            // (disease API /identify does NOT return categories per result)
+            String category = deriveCategory(diseaseName);
+
+            return new DiseaseResult(diseaseName, description, category, confidence);
 
         } catch (Exception e) {
             log.warn("Disease identification failed: {}", e.getMessage());
-            return new DiseaseResult("Unknown", "", 0.0);
+            return new DiseaseResult("Unknown", "Unknown", "", 0.0);
         }
     }
+
+    // ── Simple category inference from disease name ───────────
+    private String deriveCategory(String diseaseName) {
+        if (diseaseName == null) return "";
+        String lower = diseaseName.toLowerCase();
+        if (lower.contains("blight") || lower.contains("rust")
+            || lower.contains("mildew") || lower.contains("mold")
+            || lower.contains("fungus") || lower.contains("fusarium")
+            || lower.contains("alternaria")) return "Fungal";
+        if (lower.contains("bacteria") || lower.contains("canker")
+            || lower.contains("wilt"))    return "Bacterial";
+        if (lower.contains("virus") || lower.contains("mosaic")
+            || lower.contains("yellowing")) return "Viral";
+        if (lower.contains("aphid") || lower.contains("mite")
+            || lower.contains("hopper") || lower.contains("thrip")
+            || lower.contains("whitefly")) return "Pest";
+        return "Disease";
+    }
+
+    // ── Shared HTTP post helper ───────────────────────────────
+    private String postImage(String url, byte[] imageBytes, String filename) {
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("images", new NamedByteArrayResource(imageBytes, filename));
+
+        return RestClient.create()
+            .post().uri(url)
+            .contentType(MediaType.MULTIPART_FORM_DATA)
+            .body(body)
+            .retrieve()
+            .body(String.class);
+    }
+
+    // ── Result types ──────────────────────────────────────────
 
     @lombok.Builder
     @lombok.Data
@@ -131,6 +157,7 @@ public class PlantNetService {
         private String  cropType;
         private String  diseaseName;
         private String  diseaseCategory;
+        private String  description;
         private double  confidence;
         private boolean isHealthy;
 
@@ -139,13 +166,16 @@ public class PlantNetService {
                 .cropType("Unknown")
                 .diseaseName("Unknown")
                 .diseaseCategory("")
+                .description("")
                 .confidence(0.0)
                 .isHealthy(false)
                 .build();
         }
     }
 
-    private record DiseaseResult(String name, String category, double confidence) {}
+    // name = human readable, eppoCode = EPPO code, category = derived, confidence = score
+    private record DiseaseResult(
+        String name, String description, String category, double confidence) {}
 
     private static class NamedByteArrayResource extends ByteArrayResource {
         private final String filename;
