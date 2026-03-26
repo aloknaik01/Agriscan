@@ -56,20 +56,19 @@ public class DetectionService {
         int healthScore  = healthScoreCalculator
             .calculate(result.getConfidence(), severity);
 
-        // 5. save to DB
+        /// 5. save to DB
         Detection detection = Detection.builder()
-            .user(user)
-            .imageUrl(imageUrl)
-            .cropType(finalCropType)
-            .diseaseName(result.getDiseaseName())
-            .diseaseCategory(result.getDiseaseCategory())
-            .confidence(result.getConfidence())
-            .severity(severity)
-            .healthScore(healthScore)
-            .status(DetectionStatus.COMPLETED)
-            .build();
-
-        detection = detectionRepository.save(detection);
+        	    .user(user)
+        	    .imageUrl(imageUrl)
+        	    .cropType(finalCropType)
+        	    .diseaseName(result.getDiseaseName())
+        	    .diseaseCategory(result.getDiseaseCategory())
+        	    .description(result.getDescription())   // ← ADD THIS LINE
+        	    .confidence(result.getConfidence())
+        	    .severity(severity)
+        	    .healthScore(healthScore)
+        	    .status(DetectionStatus.COMPLETED)
+        	    .build();
 
         // 6. find matching treatment
         Treatment treatment = findTreatment(
