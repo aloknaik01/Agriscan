@@ -9,11 +9,15 @@ import com.agriscan.entity.User;
 import com.agriscan.repository.DetectionRepository;
 import com.agriscan.repository.TreatmentRepository;
 import com.agriscan.repository.UserRepository;
+
+import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Slf4j
@@ -27,6 +31,7 @@ public class DetectionService {
     private final DetectionRepository   detectionRepository;
     private final TreatmentRepository   treatmentRepository;
     private final UserRepository        userRepository;
+    private final AiTreatmentService    aiTreatmentService;
 
     // Analyze a new image
     public DetectionDTO analyze(MultipartFile image, String cropTypeHint)
@@ -63,19 +68,21 @@ public class DetectionService {
         	    .cropType(finalCropType)
         	    .diseaseName(result.getDiseaseName())
         	    .diseaseCategory(result.getDiseaseCategory())
-        	    .description(result.getDescription())   // ← ADD THIS LINE
+        	    .description(result.getDescription())   
         	    .confidence(result.getConfidence())
         	    .severity(severity)
         	    .healthScore(healthScore)
         	    .status(DetectionStatus.COMPLETED)
         	    .build();
 
+        
+        detectionRepository.save(detection);
         // 6. find matching treatment
-        Treatment treatment = findTreatment(
-            result.getDiseaseName(), finalCropType
-        );
+        TreatmentDTO treatmentDTO = getAiOrDbTreatment(
+                result.getDiseaseName(), finalCropType, severity, result.getConfidence()
+            );
 
-        return toDTO(detection, treatment);
+        return toDTO(detection, treatmentDTO);
     }
 
     //  Get scan history for logged-in user 
@@ -117,6 +124,7 @@ public class DetectionService {
             .orElse(null);
     }
 
+    
     //  mapper: Detection + Treatment to DTO 
 
     private DetectionDTO toDTO(Detection d, Treatment t) {
@@ -145,4 +153,113 @@ public class DetectionService {
 
         return dto;
     }
+    
+    // Search & Filter
+    
+    public List<DetectionDTO> search(String cropType, String disease,
+            LocalDateTime from, LocalDateTime to) {
+User user = getLoggedInUser();
+return detectionRepository
+.search(user.getId(),
+blankToNull(cropType),
+blankToNull(disease),
+from, to)
+.stream()
+.map(d -> toDTO(d, getDbTreatmentDTO(d.getDiseaseName(), d.getCropType())))
+.toList();
+}
+    
+    
+    
+    
+    //  Delete single
+    
+    @Transactional
+    public void deleteById(Long id) {
+        User user = getLoggedInUser();
+        if (!detectionRepository.existsByIdAndUserId(id, user.getId())) {
+            throw new RuntimeException("Detection not found or access denied");
+        }
+        detectionRepository.deleteById(id);
+    }
+    
+    // Delete all history
+    @Transactional
+    public void deleteAllHistory() {
+        User user = getLoggedInUser();
+        detectionRepository.deleteAllByUserId(user.getId());
+    }
+    
+    
+    
+    /** Try AI treatment; if it fails or aiGenerated=false, fall back to DB. */
+    private TreatmentDTO getAiOrDbTreatment(String diseaseName, String cropType,
+                                             String severity, double confidence) {
+        try {
+            AiTreatmentService.AiTreatmentResult ai =
+                aiTreatmentService.generateTreatment(
+                    diseaseName, cropType, severity, confidence);
+ 
+            TreatmentDTO dto = new TreatmentDTO();
+            dto.setOrganicRemedy(ai.organicRemedy());
+            dto.setChemicalPesticide(ai.chemicalPesticide());
+            dto.setPesticideDosage(ai.pesticideDosage());
+            dto.setPreventiveMeasures(ai.preventiveMeasures());
+            dto.setAiGenerated(ai.aiGenerated());
+            return dto;
+ 
+        } catch (Exception e) {
+            log.warn("AI treatment failed, using DB fallback: {}", e.getMessage());
+            return getDbTreatmentDTO(diseaseName, cropType);
+        }
+    }
+    
+    
+    private TreatmentDTO getDbTreatmentDTO(String diseaseName, String cropType) {
+        Treatment t = findTreatmentFromDb(diseaseName, cropType);
+        if (t == null) return null;
+        TreatmentDTO dto = new TreatmentDTO();
+        dto.setId(t.getId());
+        dto.setOrganicRemedy(t.getOrganicRemedy());
+        dto.setChemicalPesticide(t.getChemicalPesticide());
+        dto.setPesticideDosage(t.getPesticideDosage());
+        dto.setPreventiveMeasures(t.getPreventiveMeasures());
+        dto.setAiGenerated(false);
+        return dto;
+    }
+    
+    
+    private Treatment findTreatmentFromDb(String diseaseName, String cropType) {
+        if (diseaseName == null) return null;
+        return treatmentRepository
+            .findByDiseaseNameIgnoreCaseAndCropTypeIgnoreCase(
+                diseaseName, cropType != null ? cropType : "")
+            .or(() -> treatmentRepository
+                .findByDiseaseNameIgnoreCase(diseaseName))
+            .orElse(null);
+    }
+    
+    
+    private String blankToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s;
+    }
+    
+    private DetectionDTO toDTO(Detection d, TreatmentDTO treatmentDTO) {
+        DetectionDTO dto = new DetectionDTO();
+        dto.setId(d.getId());
+        dto.setImageUrl(d.getImageUrl());
+        dto.setCropType(d.getCropType());
+        dto.setDiseaseName(d.getDiseaseName());
+        dto.setDiseaseCategory(d.getDiseaseCategory());
+        dto.setDescription(d.getDescription());
+        dto.setConfidence(d.getConfidence());
+        dto.setSeverity(d.getSeverity());
+        dto.setHealthScore(d.getHealthScore());
+        dto.setStatus(d.getStatus() != null ? d.getStatus().name() : null);
+        dto.setCreatedAt(d.getCreatedAt());
+        dto.setTreatment(treatmentDTO);
+        return dto;
+    }
+    
+    
 }
