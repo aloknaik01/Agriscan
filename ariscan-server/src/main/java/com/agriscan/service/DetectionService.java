@@ -32,6 +32,7 @@ public class DetectionService {
     private final TreatmentRepository   treatmentRepository;
     private final UserRepository        userRepository;
     private final AiTreatmentService    aiTreatmentService;
+    private final EmailService         emailService; 
 
     // Analyze a new image
     public DetectionDTO analyze(MultipartFile image, String cropTypeHint)
@@ -82,7 +83,13 @@ public class DetectionService {
                 result.getDiseaseName(), finalCropType, severity, result.getConfidence()
             );
 
-        return toDTO(detection, treatmentDTO);
+        DetectionDTO dto = toDTO(detection, treatmentDTO);
+        
+        //  async emails 
+        emailService.sendScanResultEmail(user, dto);
+        emailService.sendSevereAlertEmail(user, dto);
+ 
+        return dto;
     }
 
     //  Get scan history for logged-in user 
