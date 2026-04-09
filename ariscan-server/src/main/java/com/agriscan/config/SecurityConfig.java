@@ -1,9 +1,8 @@
 package com.agriscan.config;
 
 import com.agriscan.security.JwtAuthFilter;
-import lombok.RequiredArgsConstructor;
-
 import com.agriscan.security.RateLimitFilter;
+import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -29,31 +28,45 @@ import java.util.List;
 @RequiredArgsConstructor
 public class SecurityConfig {
 
-    private final JwtAuthFilter jwtAuthFilter;
+    private final JwtAuthFilter   jwtAuthFilter;
     private final RateLimitFilter rateLimitFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
-                .csrf(AbstractHttpConfigurer::disable)
-                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authorizeHttpRequests(auth -> auth
-                        // Public
-                        .requestMatchers(
-                                "/api/v1/auth/register",
-                                "/api/v1/auth/login")
-                        .permitAll()
-                        .requestMatchers("/actuator/**").permitAll()
-                        // Logout requires a valid token (authentication reads it)
-                        .requestMatchers("/api/v1/auth/logout").authenticated()
-                        // Admin only
-                        .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
-                        // Everything else — authenticated
-                        .anyRequest().authenticated())
-                // JWT filter runs first, rate-limit filter runs after
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
-                .addFilterAfter(rateLimitFilter, JwtAuthFilter.class);
+            .csrf(AbstractHttpConfigurer::disable)
+            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+            .sessionManagement(session ->
+                session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+
+                // ── Public auth endpoints 
+                .requestMatchers(
+                    "/api/v1/auth/register",
+                    "/api/v1/auth/login"
+                ).permitAll()
+
+                // ── Actuator (health check) 
+                .requestMatchers("/actuator/**").permitAll()
+
+                // ── Swagger / OpenAPI UI ─
+                .requestMatchers(
+                    "/swagger-ui/**",
+                    "/swagger-ui.html",
+                    "/v3/api-docs/**",
+                    "/v3/api-docs.yaml"
+                ).permitAll()
+
+                .requestMatchers("/api/v1/auth/logout").authenticated()
+
+                // ── Admin only 
+                .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
+
+                // ── Everything else needs auth 
+                .anyRequest().authenticated()
+            )
+            .addFilterBefore(jwtAuthFilter,   UsernamePasswordAuthenticationFilter.class)
+            .addFilterAfter(rateLimitFilter,  JwtAuthFilter.class);
 
         return http.build();
     }
