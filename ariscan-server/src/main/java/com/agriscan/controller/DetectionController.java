@@ -3,11 +3,11 @@ package com.agriscan.controller;
 import com.agriscan.dto.response.AnalyticsDTO;
 import com.agriscan.dto.response.ApiResponse;
 import com.agriscan.dto.response.DetectionDTO;
+import com.agriscan.dto.response.PagedDetectionDTO;
 import com.agriscan.service.AnalyticsService;
 import com.agriscan.service.DetectionService;
 import com.agriscan.service.PdfReportService;
 import lombok.RequiredArgsConstructor;
-
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -25,10 +25,9 @@ public class DetectionController {
 
     private final DetectionService detectionService;
     private final PdfReportService pdfReportService;
-    private final AnalyticsService analyticsService; 
+    private final AnalyticsService analyticsService;
 
-    // Analyze
-    // POST /api/v1/detection/analyze
+    // ── POST /analyze ─────────────────────────────────────────
     @PostMapping(value = "/analyze",
                  consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResponse<DetectionDTO>> analyze(
@@ -38,30 +37,31 @@ public class DetectionController {
                           defaultValue = "Unknown") String cropType
     ) throws Exception {
         DetectionDTO result = detectionService.analyze(image, cropType);
-        return ResponseEntity.ok(
-            ApiResponse.success("Analysis complete", result)
-        );
+        return ResponseEntity.ok(ApiResponse.success("Analysis complete", result));
     }
 
-    
-    // History
-    // GET /api/v1/detection/history
+    // ── GET /history  (paginated) ─────────────────────────────
+    // Example: GET /api/v1/detection/history?page=0&size=10
     @GetMapping("/history")
-    public ResponseEntity<ApiResponse<List<DetectionDTO>>> history() {
+    public ResponseEntity<ApiResponse<PagedDetectionDTO>> history(
+            @RequestParam(defaultValue = "0")  int page,
+            @RequestParam(defaultValue = "10") int size
+    ) {
         return ResponseEntity.ok(
-            ApiResponse.success("History fetched", detectionService.getHistory())
-        );
+            ApiResponse.success("History fetched",
+                detectionService.getHistory(page, size)));
     }
 
-    // GET /api/v1/detection/{id}
+    // ── GET /{id} ─────────────────────────────────────────────
     @GetMapping("/{id}")
     public ResponseEntity<ApiResponse<DetectionDTO>> getOne(
             @PathVariable Long id) {
         return ResponseEntity.ok(
-            ApiResponse.success("Detection fetched", detectionService.getById(id)));
+            ApiResponse.success("Detection fetched",
+                detectionService.getById(id)));
     }
 
-    // GET /api/v1/detection/{id}/report  for  PDF download
+    // ── GET /{id}/report  (PDF download) ─────────────────────
     @GetMapping("/{id}/report")
     public ResponseEntity<byte[]> downloadReport(
             @PathVariable Long id) throws Exception {
@@ -73,8 +73,8 @@ public class DetectionController {
             .contentType(MediaType.APPLICATION_PDF)
             .body(pdf);
     }
-    
-    // Search & Filter
+
+    // ── GET /search ───────────────────────────────────────────
     @GetMapping("/search")
     public ResponseEntity<ApiResponse<List<DetectionDTO>>> search(
             @RequestParam(required = false) String cropType,
@@ -84,41 +84,31 @@ public class DetectionController {
             @RequestParam(required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) LocalDateTime to
     ) {
-        List<DetectionDTO> results =
-            detectionService.search(cropType, disease, from, to);
         return ResponseEntity.ok(
-            ApiResponse.success("Search results fetched", results));
+            ApiResponse.success("Search results fetched",
+                detectionService.search(cropType, disease, from, to)));
     }
-    
-    
-    
-     // GET /api/v1/detection/analytics
-    
+
+    // ── GET /analytics ────────────────────────────────────────
     @GetMapping("/analytics")
     public ResponseEntity<ApiResponse<AnalyticsDTO>> analytics() {
         return ResponseEntity.ok(
-            ApiResponse.success("Analytics fetched", analyticsService.getAnalytics()));
+            ApiResponse.success("Analytics fetched",
+                analyticsService.getAnalytics()));
     }
-    
-    
 
-    
-    //Delete single
-    
+    // ── DELETE /{id} ──────────────────────────────────────────
     @DeleteMapping("/{id}")
     public ResponseEntity<ApiResponse<Void>> deleteOne(
             @PathVariable Long id) {
         detectionService.deleteById(id);
-        return ResponseEntity.ok(
-            ApiResponse.success("Detection deleted", null));
+        return ResponseEntity.ok(ApiResponse.success("Detection deleted", null));
     }
-    
-    //Delete all history
-    
+
+    // ── DELETE /history ───────────────────────────────────────
     @DeleteMapping("/history")
     public ResponseEntity<ApiResponse<Void>> deleteHistory() {
         detectionService.deleteAllHistory();
-        return ResponseEntity.ok(
-            ApiResponse.success("Scan history cleared", null));
+        return ResponseEntity.ok(ApiResponse.success("Scan history cleared", null));
     }
 }
