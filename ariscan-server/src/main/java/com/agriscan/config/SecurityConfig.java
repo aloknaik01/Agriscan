@@ -2,6 +2,8 @@ package com.agriscan.config;
 
 import com.agriscan.security.JwtAuthFilter;
 import lombok.RequiredArgsConstructor;
+
+import com.agriscan.security.RateLimitFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -23,34 +25,38 @@ import java.util.List;
 
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity          
+@EnableMethodSecurity
 @RequiredArgsConstructor
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final RateLimitFilter rateLimitFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
-            .csrf(AbstractHttpConfigurer::disable)
-            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-            .sessionManagement(session -> session
-                .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(auth -> auth
-                // Public
-                .requestMatchers("/api/v1/auth/**").permitAll()
-                .requestMatchers("/actuator/**").permitAll()
-                // Admin-only at filter level (backup to @PreAuthorize)
-                .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
-                //  requires authentication
-                .anyRequest().authenticated()
-            )
-            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .csrf(AbstractHttpConfigurer::disable)
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(auth -> auth
+                        // Public
+                        .requestMatchers(
+                                "/api/v1/auth/register",
+                                "/api/v1/auth/login")
+                        .permitAll()
+                        .requestMatchers("/actuator/**").permitAll()
+                        // Logout requires a valid token (authentication reads it)
+                        .requestMatchers("/api/v1/auth/logout").authenticated()
+                        // Admin only
+                        .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
+                        // Everything else — authenticated
+                        .anyRequest().authenticated())
+                // JWT filter runs first, rate-limit filter runs after
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(rateLimitFilter, JwtAuthFilter.class);
 
         return http.build();
     }
-
-    // CORS
 
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
