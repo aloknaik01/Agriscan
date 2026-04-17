@@ -11,38 +11,26 @@ import org.springframework.web.client.RestClient;
 import java.util.List;
 import java.util.Map;
 
-
 @Slf4j
 @Service
 public class AiTreatmentService {
 
-    // If missing/blank, we return a safe fallback at request-time.
-    @Value("${anthropic.api-key:}")
-    private String anthropicApiKey;
+    @Value("${gemini.api-key:}")
+    private String geminiApiKey;
 
-    private static final String CLAUDE_API_URL =
-        "https://api.anthropic.com/v1/messages";
-    private static final String MODEL = "claude-sonnet-4-20250514";
+    private static final String GEMINI_URL =
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    /**
-     * Generate AI treatment advice for a detected disease.
-     *
-     * @param diseaseName  detected disease name
-     * @param cropType     crop type
-     * @param severity     severity level (Mild / Moderate / Severe)
-     * @param confidence   detection confidence score
-     * @return AiTreatmentResult with organic, chemical, dosage, prevention fields
-     */
     public AiTreatmentResult generateTreatment(
             String diseaseName,
             String cropType,
             String severity,
             double confidence) {
 
-        if (anthropicApiKey == null || anthropicApiKey.isBlank()) {
-            log.warn("Anthropic API key is not configured. Returning fallback treatment.");
+        if (geminiApiKey == null || geminiApiKey.isBlank()) {
+            log.warn("Gemini API key not configured. Returning fallback treatment.");
             return AiTreatmentResult.fallback(diseaseName, cropType);
         }
 
@@ -50,18 +38,20 @@ public class AiTreatmentService {
 
         try {
             Map<String, Object> requestBody = Map.of(
-                "model", MODEL,
-                "max_tokens", 1000,
-                "messages", List.of(
-                    Map.of("role", "user", "content", prompt)
+                "contents", List.of(
+                    Map.of("parts", List.of(
+                        Map.of("text", prompt)
+                    ))
+                ),
+                "generationConfig", Map.of(
+                    "temperature",     0.2,   // low temp = consistent structured output
+                    "maxOutputTokens", 600
                 )
             );
 
             String responseBody = RestClient.create()
                 .post()
-                .uri(CLAUDE_API_URL)
-                .header("x-api-key", anthropicApiKey)
-                .header("anthropic-version", "2023-06-01")
+                .uri(GEMINI_URL + "?key=" + geminiApiKey)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBody)
                 .retrieve()
@@ -70,15 +60,15 @@ public class AiTreatmentService {
             return parseResponse(responseBody);
 
         } catch (Exception e) {
-            log.error("Claude API call failed: {}", e.getMessage());
+            log.error("Gemini API call failed: {}", e.getMessage());
             return AiTreatmentResult.fallback(diseaseName, cropType);
         }
     }
 
-    // Prompt builder 
+    // Prompt 
 
     private String buildPrompt(String diseaseName, String cropType,
-                               String severity, double confidence) {
+                                String severity, double confidence) {
         return String.format("""
             You are an agricultural expert. A farmer's crop scan has detected the following:
 
@@ -87,8 +77,8 @@ public class AiTreatmentService {
             - Severity: %s
             - Detection Confidence: %.0f%%
 
-            Please provide treatment recommendations in the following JSON format ONLY
-            (no preamble, no markdown, just raw JSON):
+            Provide treatment recommendations in this JSON format ONLY
+            (no preamble, no markdown, no code fences, just raw JSON):
 
             {
               "organicRemedy": "...",
@@ -107,12 +97,18 @@ public class AiTreatmentService {
 
     private AiTreatmentResult parseResponse(String responseBody) throws Exception {
         JsonNode root = objectMapper.readTree(responseBody);
+
+        // Gemini: candidates[0].content.parts[0].text
         String text = root
-            .path("content").get(0)
+            .path("candidates").get(0)
+            .path("content")
+            .path("parts").get(0)
             .path("text").asText();
 
-        // Strip markdown code fences if present
-        text = text.replaceAll("```json", "").replaceAll("```", "").trim();
+        // Strip markdown fences if present
+        text = text.replaceAll("(?s)```json\\s*", "")
+                   .replaceAll("```", "")
+                   .trim();
 
         JsonNode json = objectMapper.readTree(text);
         return new AiTreatmentResult(
@@ -124,7 +120,7 @@ public class AiTreatmentService {
         );
     }
 
-    // Result record 
+    //  Result 
 
     public record AiTreatmentResult(
         String organicRemedy,
