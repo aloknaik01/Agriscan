@@ -19,39 +19,36 @@ public class AiTreatmentService {
     private String geminiApiKey;
 
     private static final String GEMINI_URL =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AiTreatmentResult generateTreatment(
-            String diseaseName,
-            String cropType,
-            String severity,
-            double confidence) {
+            String diseaseName, String cropType,
+            String severity, double confidence) {
 
         if (geminiApiKey == null || geminiApiKey.isBlank()) {
             log.warn("Gemini API key not configured. Returning fallback treatment.");
             return AiTreatmentResult.fallback(diseaseName, cropType);
         }
 
-        String prompt = buildPrompt(diseaseName, cropType, severity, confidence);
-
         try {
             Map<String, Object> requestBody = Map.of(
                 "contents", List.of(
                     Map.of("parts", List.of(
-                        Map.of("text", prompt)
+                        Map.of("text", buildPrompt(diseaseName, cropType, severity, confidence))
                     ))
                 ),
                 "generationConfig", Map.of(
-                    "temperature",     0.2,   // low temp = consistent structured output
+                    "thinkingConfig", Map.of("thinkingLevel", "low"),
                     "maxOutputTokens", 600
                 )
             );
 
             String responseBody = RestClient.create()
                 .post()
-                .uri(GEMINI_URL + "?key=" + geminiApiKey)
+                .uri(GEMINI_URL)
+                .header("x-goog-api-key", geminiApiKey)  // ← correct header
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBody)
                 .retrieve()
@@ -60,17 +57,17 @@ public class AiTreatmentService {
             return parseResponse(responseBody);
 
         } catch (Exception e) {
-            log.error("Gemini API call failed: {}", e.getMessage());
+            log.error("Gemini treatment API call failed: {}", e.getMessage());
             return AiTreatmentResult.fallback(diseaseName, cropType);
         }
     }
 
-    // Prompt 
+    // ── Prompt ────────────────────────────────────────────────
 
     private String buildPrompt(String diseaseName, String cropType,
                                 String severity, double confidence) {
         return String.format("""
-            You are an agricultural expert. A farmer's crop scan has detected the following:
+            You are an agricultural expert. A farmer's crop scan detected:
 
             - Crop: %s
             - Disease: %s
@@ -93,7 +90,7 @@ public class AiTreatmentService {
             cropType, diseaseName, severity, confidence * 100);
     }
 
-    //  Response parser
+    // ── Parser ────────────────────────────────────────────────
 
     private AiTreatmentResult parseResponse(String responseBody) throws Exception {
         JsonNode root = objectMapper.readTree(responseBody);
@@ -101,14 +98,12 @@ public class AiTreatmentService {
         // Gemini: candidates[0].content.parts[0].text
         String text = root
             .path("candidates").get(0)
-            .path("content")
-            .path("parts").get(0)
+            .path("content").path("parts").get(0)
             .path("text").asText();
 
-        // Strip markdown fences if present
+        // Strip markdown fences if Gemini wraps output
         text = text.replaceAll("(?s)```json\\s*", "")
-                   .replaceAll("```", "")
-                   .trim();
+                   .replaceAll("```", "").trim();
 
         JsonNode json = objectMapper.readTree(text);
         return new AiTreatmentResult(
@@ -120,7 +115,7 @@ public class AiTreatmentService {
         );
     }
 
-    //  Result 
+    // ── Result ────────────────────────────────────────────────
 
     public record AiTreatmentResult(
         String organicRemedy,

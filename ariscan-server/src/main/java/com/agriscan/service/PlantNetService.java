@@ -53,12 +53,12 @@ public class PlantNetService {
     // ── 1. Identify crop/plant species ────────────────────────
     private String identifyPlant(byte[] imageBytes, String filename) {
         try {
-            // organs=leaf tells PlantNet this is a leaf image
+            // PlantNet v2: 'organs' must be a form field, NOT a query param
             String url = baseUrl + "/identify/all"
                 + "?api-key=" + apiKey
-                + "&organs=leaf&lang=en&nb-results=1";
+                + "&lang=en&nb-results=1";
 
-            String response = postImage(url, imageBytes, filename);
+            String response = postImage(url, imageBytes, filename, "leaf");
 
             JsonNode root    = objectMapper.readTree(response);
             JsonNode results = root.path("results");
@@ -85,7 +85,8 @@ public class PlantNetService {
                 + "?api-key=" + apiKey
                 + "&nb-results=1&lang=en&no-reject=true";
 
-            String response = postImage(url, imageBytes, filename);
+            // disease endpoint does not require an 'organs' field
+            String response = postImage(url, imageBytes, filename, null);
             log.debug("PlantNet disease raw response: {}", response);
 
             JsonNode root    = objectMapper.readTree(response);
@@ -137,9 +138,17 @@ public class PlantNetService {
     }
 
     // ── Shared HTTP post helper ───────────────────────────────
-    private String postImage(String url, byte[] imageBytes, String filename) {
+    /**
+     * @param organ pass e.g. "leaf", "flower", "fruit" for /identify/all;
+     *              pass null for the /diseases/identify endpoint.
+     */
+    private String postImage(String url, byte[] imageBytes, String filename, String organ) {
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         body.add("images", new NamedByteArrayResource(imageBytes, filename));
+        // PlantNet v2: organs must be a form field, not a query parameter
+        if (organ != null && !organ.isBlank()) {
+            body.add("organs", organ);
+        }
 
         return RestClient.create()
             .post().uri(url)
