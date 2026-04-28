@@ -24,17 +24,16 @@ public class WeatherAdvisoryService {
 
     private static final String OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
 
-    // Gemini endpoint — gemini-2.0-flash 
+    // ✅ correct model + correct endpoint
     private static final String GEMINI_URL =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public WeatherAdvisoryDTO getAdvisory(double latitude, double longitude,
-                                          String cropType) {
-        WeatherData weather = fetchWeather(latitude, longitude);
-        String advisory = generateAdvisory(weather, cropType);
-        AdvisoryResult result = parseAdvisory(advisory);
+    public WeatherAdvisoryDTO getAdvisory(double latitude, double longitude, String cropType) {
+        WeatherData weather   = fetchWeather(latitude, longitude);
+        String raw            = callGemini(buildPrompt(weather, cropType));
+        AdvisoryResult result = parseAdvisory(raw);
 
         return WeatherAdvisoryDTO.builder()
             .temperatureCelsius(weather.currentTemp)
@@ -49,33 +48,20 @@ public class WeatherAdvisoryService {
             .build();
     }
 
-    //  Open-Meteo 
+    // ── Open-Meteo ────────────────────────────────────────────
 
     private WeatherData fetchWeather(double lat, double lon) {
         try {
             String url = OPEN_METEO_URL
-                + "?latitude=" + lat
-                + "&longitude=" + lon
-                + "&current=temperature_2m,relative_humidity_2m,"
-                +           "precipitation,wind_speed_10m"
-                + "&daily=temperature_2m_max,temperature_2m_min,"
-                +         "precipitation_sum,relative_humidity_2m_max"
-                + "&timezone=auto"
-                + "&forecast_days=4";
+                + "?latitude=" + lat + "&longitude=" + lon
+                + "&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m"
+                + "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,relative_humidity_2m_max"
+                + "&timezone=auto&forecast_days=4";
 
-            String response = RestClient.create()
-                .get().uri(url)
-                .retrieve()
-                .body(String.class);
-
+            String response  = RestClient.create().get().uri(url).retrieve().body(String.class);
             JsonNode root    = objectMapper.readTree(response);
             JsonNode current = root.path("current");
             JsonNode daily   = root.path("daily");
-
-            double currentTemp      = current.path("temperature_2m").asDouble();
-            double currentHumidity  = current.path("relative_humidity_2m").asDouble();
-            double currentPrecip    = current.path("precipitation").asDouble();
-            double currentWindSpeed = current.path("wind_speed_10m").asDouble();
 
             List<WeatherAdvisoryDTO.DailyForecast> forecast = new ArrayList<>();
             JsonNode dates   = daily.path("time");
@@ -94,19 +80,69 @@ public class WeatherAdvisoryService {
                     .build());
             }
 
-            return new WeatherData(currentTemp, currentHumidity,
-                currentPrecip, currentWindSpeed, forecast);
-
+            return new WeatherData(
+                current.path("temperature_2m").asDouble(),
+                current.path("relative_humidity_2m").asDouble(),
+                current.path("precipitation").asDouble(),
+                current.path("wind_speed_10m").asDouble(),
+                forecast
+            );
         } catch (Exception e) {
             log.error("Failed to fetch weather data: {}", e.getMessage());
             return WeatherData.unknown();
         }
     }
 
-    //  Gemini advisory 
+    // ── Gemini ────────────────────────────────────────────────
 
-    private String generateAdvisory(WeatherData w, String cropType) {
-        String prompt = """
+    private String callGemini(String prompt) {
+        try {
+            Map<String, Object> requestBody = Map.of(
+                "contents", List.of(
+                    Map.of("parts", List.of(Map.of("text", prompt)))
+                ),
+                "generationConfig", Map.of(
+                    "thinkingConfig", Map.of("thinkingLevel", "low"),
+                    "maxOutputTokens", 500
+                )
+            );
+
+            String response = RestClient.create()
+                .post()
+                .uri(GEMINI_URL)
+                .header("x-goog-api-key", geminiApiKey)  // ✅ correct header, NOT ?key=
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(requestBody)
+                .retrieve()
+                .body(String.class);
+
+            JsonNode root  = objectMapper.readTree(response);
+            JsonNode parts = root.path("candidates").get(0)
+                                 .path("content").path("parts");
+
+            // gemini-3-flash-preview returns multiple parts when thinking is enabled:
+            // part[0] may be thoughtSignature, part[1] is the actual text.
+            // We find the first part that has a non-empty "text" field.
+            for (JsonNode part : parts) {
+                String text = part.path("text").asText("").trim();
+                if (!text.isEmpty()) {
+                    return text;
+                }
+            }
+
+            log.warn("No text part found in Gemini response");
+            return fallbackAdvisory();
+
+        } catch (Exception e) {
+            log.error("Gemini weather advisory failed: {}", e.getMessage());
+            return fallbackAdvisory();
+        }
+    }
+
+    // ── Prompt ────────────────────────────────────────────────
+
+    private String buildPrompt(WeatherData w, String cropType) {
+        return """
             You are an agricultural expert. Based on the following weather conditions,
             provide a crop advisory for a farmer growing %s.
 
@@ -131,50 +167,14 @@ public class WeatherAdvisoryService {
                 w.currentPrecip, w.currentWindSpeed,
                 formatForecast(w.forecast)
             );
-
-        try {
-            // Gemini request body
-            Map<String, Object> requestBody = Map.of(
-                "contents", List.of(
-                    Map.of("parts", List.of(
-                        Map.of("text", prompt)
-                    ))
-                ),
-                "generationConfig", Map.of(
-                    "temperature",     0.3,
-                    "maxOutputTokens", 500
-                )
-            );
-
-            String response = RestClient.create()
-                .post()
-                .uri(GEMINI_URL + "?key=" + geminiApiKey)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(requestBody)
-                .retrieve()
-                .body(String.class);
-
-            // Gemini response: candidates[0].content.parts[0].text
-            JsonNode root = objectMapper.readTree(response);
-            return root
-                .path("candidates").get(0)
-                .path("content")
-                .path("parts").get(0)
-                .path("text").asText();
-
-        } catch (Exception e) {
-            log.error("Gemini advisory failed: {}", e.getMessage());
-            return "{\"advisory\":\"Monitor your crops closely given current conditions.\","
-                 + "\"diseaseRiskLevel\":\"Medium\",\"riskFactors\":[\"Unable to assess\"]}";
-        }
     }
 
-    private AdvisoryResult parseAdvisory(String json) {
+    // ── Parse ─────────────────────────────────────────────────
+
+    private AdvisoryResult parseAdvisory(String text) {
         try {
-            // Strip markdown fences if Gemini wraps in ```json ... ```
-            String clean = json.replaceAll("(?s)```json\\s*", "")
-                               .replaceAll("```", "")
-                               .trim();
+            String clean = text.replaceAll("(?s)```json\\s*", "")
+                               .replaceAll("```", "").trim();
             JsonNode node = objectMapper.readTree(clean);
 
             List<String> factors = new ArrayList<>();
@@ -186,12 +186,17 @@ public class WeatherAdvisoryService {
                 factors
             );
         } catch (Exception e) {
-            log.warn("Failed to parse Gemini advisory JSON: {}", e.getMessage());
+            log.warn("Failed to parse Gemini advisory: {}", e.getMessage());
             return new AdvisoryResult("Monitor crops regularly.", "Medium", List.of());
         }
     }
 
-    //  Helpers 
+    // ── Helpers ───────────────────────────────────────────────
+
+    private String fallbackAdvisory() {
+        return "{\"advisory\":\"Monitor your crops closely given current conditions.\","
+             + "\"diseaseRiskLevel\":\"Medium\",\"riskFactors\":[\"Unable to assess\"]}";
+    }
 
     private String describeWeather(WeatherData w) {
         if (w.currentPrecip > 5)    return "Rainy";
@@ -213,23 +218,15 @@ public class WeatherAdvisoryService {
         return sb.toString();
     }
 
-    //  Inner types 
+    // ── Inner types ───────────────────────────────────────────
 
     private record WeatherData(
-        double currentTemp,
-        double currentHumidity,
-        double currentPrecip,
-        double currentWindSpeed,
+        double currentTemp, double currentHumidity,
+        double currentPrecip, double currentWindSpeed,
         List<WeatherAdvisoryDTO.DailyForecast> forecast
     ) {
-        static WeatherData unknown() {
-            return new WeatherData(0, 0, 0, 0, List.of());
-        }
+        static WeatherData unknown() { return new WeatherData(0, 0, 0, 0, List.of()); }
     }
 
-    private record AdvisoryResult(
-        String advisory,
-        String riskLevel,
-        List<String> riskFactors
-    ) {}
+    private record AdvisoryResult(String advisory, String riskLevel, List<String> riskFactors) {}
 }

@@ -18,6 +18,7 @@ public class AiTreatmentService {
     @Value("${gemini.api-key:}")
     private String geminiApiKey;
 
+    // ✅ correct model
     private static final String GEMINI_URL =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
 
@@ -48,7 +49,7 @@ public class AiTreatmentService {
             String responseBody = RestClient.create()
                 .post()
                 .uri(GEMINI_URL)
-                .header("x-goog-api-key", geminiApiKey)  // ← correct header
+                .header("x-goog-api-key", geminiApiKey)  // ✅ correct header
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(requestBody)
                 .retrieve()
@@ -93,15 +94,28 @@ public class AiTreatmentService {
     // ── Parser ────────────────────────────────────────────────
 
     private AiTreatmentResult parseResponse(String responseBody) throws Exception {
-        JsonNode root = objectMapper.readTree(responseBody);
+        JsonNode root  = objectMapper.readTree(responseBody);
+        JsonNode parts = root.path("candidates").get(0)
+                             .path("content").path("parts");
 
-        // Gemini: candidates[0].content.parts[0].text
-        String text = root
-            .path("candidates").get(0)
-            .path("content").path("parts").get(0)
-            .path("text").asText();
+        // gemini-3-flash-preview with thinking enabled returns multiple parts.
+        // The first part may contain only a "thoughtSignature" (internal reasoning blob).
+        // We must find the first part that actually has a non-empty "text" field.
+        String text = "";
+        for (JsonNode part : parts) {
+            String candidate = part.path("text").asText("").trim();
+            if (!candidate.isEmpty()) {
+                text = candidate;
+                break;
+            }
+        }
 
-        // Strip markdown fences if Gemini wraps output
+        if (text.isEmpty()) {
+            log.warn("No text content found in Gemini treatment response");
+            return AiTreatmentResult.fallback("Unknown", "Unknown");
+        }
+
+        // Strip markdown fences if present
         text = text.replaceAll("(?s)```json\\s*", "")
                    .replaceAll("```", "").trim();
 
