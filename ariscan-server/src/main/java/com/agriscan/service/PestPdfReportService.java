@@ -1,0 +1,169 @@
+package com.agriscan.service;
+
+import com.agriscan.dto.response.PestScanDTO;
+
+import lombok.extern.slf4j.Slf4j;
+
+import org.apache.pdfbox.pdmodel.*;
+import org.apache.pdfbox.pdmodel.common.PDRectangle;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
+import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.springframework.stereotype.Service;
+
+import java.io.ByteArrayOutputStream;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
+
+@Slf4j
+@Service
+public class PestPdfReportService {
+
+    public byte[] generateReport(PestScanDTO dto) throws Exception {
+
+        PDDocument doc  = new PDDocument();
+        PDPage page     = new PDPage(PDRectangle.A4);
+        doc.addPage(page);
+
+        PDType1Font bold    = new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD);
+        PDType1Font regular = new PDType1Font(Standard14Fonts.FontName.HELVETICA);
+        PDType1Font italic  = new PDType1Font(Standard14Fonts.FontName.HELVETICA_OBLIQUE);
+
+        PDPageContentStream cs = new PDPageContentStream(doc, page);
+
+        // ── Title ─────────────────────────────────────────────
+        cs.beginText();
+        cs.setFont(bold, 20);
+        cs.newLineAtOffset(50, 780);
+        cs.showText("AgriScan — Pest Identification Report");
+        cs.endText();
+
+        cs.moveTo(50, 768); cs.lineTo(545, 768); cs.stroke();
+
+        // ── Insect image ──────────────────────────────────────
+        try {
+            byte[] imgBytes = new URL(dto.getImageUrl()).openStream().readAllBytes();
+            PDImageXObject img = PDImageXObject.createFromByteArray(doc, imgBytes, "insect");
+            cs.drawImage(img, 50, 580, 180, 160);
+        } catch (Exception e) {
+            log.warn("Could not embed insect image: {}", e.getMessage());
+        }
+
+        // ── Identification details (right of image) ────────────
+        cs.beginText();
+        cs.setFont(bold, 13);
+        cs.newLineAtOffset(250, 730);
+        cs.showText("Pest Identification");
+        cs.setFont(regular, 11);
+        cs.setLeading(20f);
+        cs.newLine();
+        cs.showText("Common Name    :  " + safe(dto.getCommonName()));
+        cs.newLine();
+        cs.showText("Scientific Name:  " + safe(dto.getScientificName()));
+        cs.newLine();
+        cs.showText("Crop           :  " + safe(dto.getCropType()));
+        cs.newLine();
+        cs.showText("Confidence     :  " + pct(dto.getConfidence()));
+        cs.newLine();
+        cs.showText("Threat Level   :  " + safe(dto.getThreatLevel()));
+        cs.newLine();
+        cs.showText("Is Crop Pest   :  " + (Boolean.TRUE.equals(dto.getIsCropPest()) ? "Yes" : "No"));
+        cs.newLine();
+        cs.showText("Order / Family :  "
+            + safe(dto.getTaxonomyOrder()) + " / " + safe(dto.getTaxonomyFamily()));
+        cs.newLine();
+        cs.showText("Scan Date      :  " + safe(str(dto.getCreatedAt())));
+        cs.endText();
+
+        // ── Tags ──────────────────────────────────────────────
+        float y = 555f;
+        if (dto.getRoleTags() != null && !dto.getRoleTags().isEmpty()) {
+            cs.beginText();
+            cs.setFont(bold, 11);
+            cs.newLineAtOffset(50, y);
+            cs.showText("Role: ");
+            cs.setFont(regular, 11);
+            cs.showText(String.join(", ", dto.getRoleTags()));
+            cs.endText();
+            y -= 18;
+        }
+        if (dto.getDangerTags() != null && !dto.getDangerTags().isEmpty()) {
+            cs.beginText();
+            cs.setFont(bold, 11);
+            cs.newLineAtOffset(50, y);
+            cs.showText("Danger: ");
+            cs.setFont(regular, 11);
+            cs.showText(String.join(", ", dto.getDangerTags()));
+            cs.endText();
+            y -= 22;
+        }
+
+        // ── Description ───────────────────────────────────────
+        if (dto.getDescription() != null && !dto.getDescription().isBlank()) {
+            cs.beginText();
+            cs.setFont(bold, 12);
+            cs.newLineAtOffset(50, y);
+            cs.showText("About This Insect");
+            cs.setFont(regular, 10);
+            cs.setLeading(15f);
+            y -= 6;
+            for (String line : wrap(dto.getDescription(), 95)) {
+                cs.newLine();
+                cs.showText(line);
+                y -= 15;
+            }
+            cs.endText();
+            y -= 20;
+        }
+
+        // ── Control recommendations ────────────────────────────
+        cs.beginText();
+        cs.setFont(bold, 12);
+        cs.newLineAtOffset(50, y);
+        cs.showText("Crop Protection Recommendations");
+        cs.setFont(regular, 10);
+        cs.setLeading(16f);
+        cs.newLine();
+        cs.showText("Crop Impact  : " + safe(dto.getCropImpact()));
+        cs.newLine();
+        cs.showText("Organic Ctrl : " + safe(dto.getOrganicControl()));
+        cs.newLine();
+        cs.showText("Chemical Ctrl: " + safe(dto.getChemicalControl()));
+        cs.newLine();
+        cs.showText("Prevention   : " + safe(dto.getPreventiveMeasures()));
+        cs.endText();
+
+        // ── Footer ────────────────────────────────────────────
+        cs.beginText();
+        cs.setFont(italic, 9);
+        cs.newLineAtOffset(50, 30);
+        cs.showText("Generated by AgriScan — AI-Powered Pest & Disease Detection");
+        cs.endText();
+
+        cs.close();
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        doc.save(out);
+        doc.close();
+        return out.toByteArray();
+    }
+
+    private String safe(String v) { return v != null ? v : "N/A"; }
+    private String str(Object v)  { return v != null ? v.toString() : "N/A"; }
+    private String pct(Double v)  {
+        return v != null ? String.format("%.1f%%", v * 100) : "N/A";
+    }
+
+    private List<String> wrap(String text, int maxLen) {
+        List<String> lines = new ArrayList<>();
+        while (text.length() > maxLen) {
+            int cut = text.lastIndexOf(' ', maxLen);
+            if (cut == -1) cut = maxLen;
+            lines.add(text.substring(0, cut));
+            text = text.substring(cut).trim();
+        }
+        lines.add(text);
+        return lines;
+    }
+}

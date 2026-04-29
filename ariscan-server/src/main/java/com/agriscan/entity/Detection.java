@@ -40,12 +40,19 @@ public class Detection {
 
     private String cropType;             
 
-    private String diseaseName;          
+    private String diseaseName;
 
-    private String diseaseCategory;      
+    private String diseaseCategory;
+
+    // Native from plant.id API — Fungi / Bacteria / Virus / Pest / Abiotic
+    private String diseaseType;
 
     @Column(columnDefinition = "TEXT")
     private String description;
+
+    // Visible symptoms the farmer can look for on the plant
+    @Column(columnDefinition = "TEXT")
+    private String symptoms;
 
     private Double confidence;           
     private String severity;             

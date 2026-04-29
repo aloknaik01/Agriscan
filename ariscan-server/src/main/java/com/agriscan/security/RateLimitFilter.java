@@ -21,29 +21,36 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private RateLimiter rateLimiter;
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
             throws ServletException, IOException {
 
-        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        Authentication authentication =
+            SecurityContextHolder.getContext().getAuthentication();
         String email = null;
-        if (authentication != null && authentication.isAuthenticated() && !authentication.getPrincipal().equals("anonymousUser")) {
+        if (authentication != null && authentication.isAuthenticated()
+                && !authentication.getPrincipal().equals("anonymousUser")) {
             email = authentication.getName();
         }
 
         String key = rateLimiter.resolveKey(request, email);
         String uri = request.getRequestURI();
 
-        boolean allowed;
-        if (uri != null && uri.contains("/api/v1/detection/analyze")) {
-            allowed = rateLimiter.allowAnalyze(key);
-        } else {
-            allowed = rateLimiter.allowGeneral(key);
-        }
+        // Both /detection/analyze AND /pest/analyze share the stricter analyze bucket
+        boolean isAnalyzeEndpoint =
+            uri != null && (uri.contains("/api/v1/detection/analyze")
+                         || uri.contains("/api/v1/pest/analyze"));
+
+        boolean allowed = isAnalyzeEndpoint
+            ? rateLimiter.allowAnalyze(key)
+            : rateLimiter.allowGeneral(key);
 
         if (!allowed) {
             response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
             response.setContentType("application/json");
-            response.getWriter().write("{\"success\":false,\"message\":\"Too many requests. Please try again later.\"}");
+            response.getWriter().write(
+                "{\"success\":false,\"message\":\"Too many requests. Please try again later.\"}");
             return;
         }
 

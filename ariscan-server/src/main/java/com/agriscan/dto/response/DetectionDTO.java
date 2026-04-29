@@ -10,7 +10,9 @@ public class DetectionDTO {
     private String cropType;
     private String diseaseName;
     private String diseaseCategory;
+    private String diseaseType;     // Fungi / Bacteria / Virus / Pest / Abiotic
     private String description;
+    private String symptoms;        // Visible symptom description
     private Double confidence;
     private String severity;
     private Integer healthScore;

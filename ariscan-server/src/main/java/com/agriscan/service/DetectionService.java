@@ -14,6 +14,7 @@ import com.agriscan.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -36,12 +37,12 @@ public class DetectionService {
     );
 
     private final CloudinaryService     cloudinaryService;
-    private final PlantNetService       plantNetService;
+    private final KindwiseService       kindwiseService;        // ← replaces PlantNetService
     private final HealthScoreCalculator healthScoreCalculator;
     private final DetectionRepository   detectionRepository;
     private final TreatmentRepository   treatmentRepository;
     private final UserRepository        userRepository;
-    private final AiTreatmentService    aiTreatmentService;
+    private final AiTreatmentService    aiTreatmentService;     // ← fallback only now
     private final EmailService          emailService;
     private final AnalyticsService      analyticsService;
 
@@ -50,35 +51,108 @@ public class DetectionService {
         validateImage(image);
         User   user     = getLoggedInUser();
         String imageUrl = cloudinaryService.uploadImage(image);
-        PlantNetService.PlantNetResult result = plantNetService.analyze(image);
+
+        // ── Call Kindwise plant.id v3 ──────────────────────────
+        KindwiseService.KindwiseResult result = kindwiseService.analyze(image);
+
         String finalCropType = (cropTypeHint != null && !cropTypeHint.equalsIgnoreCase("Unknown"))
             ? cropTypeHint : result.getCropType();
+
         String severity    = result.isHealthy() ? "Healthy"
             : healthScoreCalculator.determineSeverity(result.getConfidence());
         int    healthScore = healthScoreCalculator.calculate(result.getConfidence(), severity);
+
         Detection detection = Detection.builder()
             .user(user).imageUrl(imageUrl).cropType(finalCropType)
-            .diseaseName(result.getDiseaseName()).diseaseCategory(result.getDiseaseCategory())
-            .description(result.getDescription()).confidence(result.getConfidence())
-            .severity(severity).healthScore(healthScore).status(DetectionStatus.COMPLETED)
+            .diseaseName(result.getDiseaseName())
+            .diseaseCategory(result.getDiseaseCategory())
+            .diseaseType(result.getDiseaseType())
+            .description(result.getDescription())
+            .symptoms(result.getSymptoms())
+            .confidence(result.getConfidence())
+            .severity(severity).healthScore(healthScore)
+            .status(DetectionStatus.COMPLETED)
             .build();
+
         detectionRepository.save(detection);
         analyticsService.evictForUser(user.getEmail());
-        TreatmentDTO treatmentDTO = getAiOrDbTreatment(
-            result.getDiseaseName(), finalCropType, severity, result.getConfidence());
+
+        // ── Treatment: plant.id native → DB → Gemini (priority order) ──
+        TreatmentDTO treatmentDTO = resolveTreatment(result, finalCropType, severity);
+
         DetectionDTO dto = toDTO(detection, treatmentDTO);
         emailService.sendScanResultEmail(user, dto);
         emailService.sendSevereAlertEmail(user, dto);
         return dto;
     }
 
+    // ── Treatment resolution (3-tier) ─────────────────────────
+
+    /**
+     * Priority:
+     *   1. plant.id API returned treatment natively → use it directly
+     *   2. Local DB has a matching treatment row     → use it
+     *   3. Gemini AI generates treatment             → use it
+     *   4. Hard fallback message                     → last resort
+     */
+    private TreatmentDTO resolveTreatment(KindwiseService.KindwiseResult result,
+                                           String cropType, String severity) {
+        // Tier 1: Native from plant.id (biological / chemical / prevention)
+        if (result.isTreatmentFromApi()
+                && result.getPreventiveMeasures() != null) {
+            TreatmentDTO dto = new TreatmentDTO();
+            dto.setOrganicRemedy(result.getOrganicRemedy());
+            dto.setChemicalPesticide(result.getChemicalPesticide());
+            dto.setPesticideDosage(null);           // plant.id doesn't return dosage
+            dto.setPreventiveMeasures(result.getPreventiveMeasures());
+            dto.setAiGenerated(false);
+            log.debug("Treatment resolved from plant.id API for: {}", result.getDiseaseName());
+            return dto;
+        }
+
+        // Tier 2: Local DB
+        TreatmentDTO dbDto = getDbTreatmentDTO(result.getDiseaseName(), cropType);
+        if (dbDto != null) {
+            log.debug("Treatment resolved from DB for: {}", result.getDiseaseName());
+            return dbDto;
+        }
+
+        // Tier 3: Gemini AI fallback
+        try {
+            AiTreatmentService.AiTreatmentResult ai =
+                aiTreatmentService.generateTreatment(
+                    result.getDiseaseName(), cropType, severity, result.getConfidence());
+            TreatmentDTO dto = new TreatmentDTO();
+            dto.setOrganicRemedy(ai.organicRemedy());
+            dto.setChemicalPesticide(ai.chemicalPesticide());
+            dto.setPesticideDosage(ai.pesticideDosage());
+            dto.setPreventiveMeasures(ai.preventiveMeasures());
+            dto.setAiGenerated(ai.aiGenerated());
+            log.debug("Treatment resolved from Gemini AI for: {}", result.getDiseaseName());
+            return dto;
+        } catch (Exception e) {
+            log.warn("All treatment sources failed for {}: {}", result.getDiseaseName(), e.getMessage());
+            TreatmentDTO fallback = new TreatmentDTO();
+            fallback.setOrganicRemedy("Consult a local agronomist for organic remedies.");
+            fallback.setChemicalPesticide("Consult a local agronomist for chemical treatment.");
+            fallback.setPesticideDosage("Dosage varies — consult product label.");
+            fallback.setPreventiveMeasures("Maintain good field hygiene and monitor regularly.");
+            fallback.setAiGenerated(false);
+            return fallback;
+        }
+    }
+
+    // ── History ───────────────────────────────────────────────
+
     public PagedDetectionDTO getHistory(int page, int size) {
         User user = getLoggedInUser();
         int safeSize = Math.min(size, 50);
         Page<Detection> pageResult = detectionRepository.findByUserIdOrderByCreatedAtDesc(
-            user.getId(), PageRequest.of(page, safeSize, Sort.by(Sort.Direction.DESC, "createdAt")));
+            user.getId(), PageRequest.of(page, safeSize,
+                Sort.by(Sort.Direction.DESC, "createdAt")));
         List<DetectionDTO> content = pageResult.getContent().stream()
-            .map(d -> toDTO(d, getDbTreatmentDTO(d.getDiseaseName(), d.getCropType()))).toList();
+            .map(d -> toDTO(d, getDbTreatmentDTO(d.getDiseaseName(), d.getCropType())))
+            .toList();
         return PagedDetectionDTO.builder()
             .content(content).page(pageResult.getNumber()).size(pageResult.getSize())
             .totalElements(pageResult.getTotalElements()).totalPages(pageResult.getTotalPages())
@@ -96,7 +170,8 @@ public class DetectionService {
         User user = getLoggedInUser();
         return detectionRepository
             .search(user.getId(), blankToNull(cropType), blankToNull(disease), from, to)
-            .stream().map(d -> toDTO(d, getDbTreatmentDTO(d.getDiseaseName(), d.getCropType())))
+            .stream()
+            .map(d -> toDTO(d, getDbTreatmentDTO(d.getDiseaseName(), d.getCropType())))
             .toList();
     }
 
@@ -116,9 +191,13 @@ public class DetectionService {
         analyticsService.evictForUser(user.getEmail());
     }
 
+    // ── Private helpers ───────────────────────────────────────
+
     private void validateImage(MultipartFile image) {
-        if (image == null || image.isEmpty()) throw new RuntimeException("Image file is required");
-        if (image.getSize() > MAX_IMAGE_BYTES) throw new RuntimeException("Image exceeds 10 MB limit");
+        if (image == null || image.isEmpty())
+            throw new RuntimeException("Image file is required");
+        if (image.getSize() > MAX_IMAGE_BYTES)
+            throw new RuntimeException("Image exceeds 10 MB limit");
         String ct = image.getContentType();
         if (ct == null || !ALLOWED_TYPES.contains(ct.toLowerCase()))
             throw new RuntimeException("Unsupported image type. Allowed: JPEG, PNG, WEBP, GIF");
@@ -130,45 +209,40 @@ public class DetectionService {
             .orElseThrow(() -> new RuntimeException("User not found"));
     }
 
-    private TreatmentDTO getAiOrDbTreatment(String diseaseName, String cropType,
-                                             String severity, double confidence) {
-        try {
-            AiTreatmentService.AiTreatmentResult ai =
-                aiTreatmentService.generateTreatment(diseaseName, cropType, severity, confidence);
-            TreatmentDTO dto = new TreatmentDTO();
-            dto.setOrganicRemedy(ai.organicRemedy()); dto.setChemicalPesticide(ai.chemicalPesticide());
-            dto.setPesticideDosage(ai.pesticideDosage()); dto.setPreventiveMeasures(ai.preventiveMeasures());
-            dto.setAiGenerated(ai.aiGenerated());
-            return dto;
-        } catch (Exception e) {
-            log.warn("AI treatment failed, using DB fallback: {}", e.getMessage());
-            return getDbTreatmentDTO(diseaseName, cropType);
-        }
-    }
-
     private TreatmentDTO getDbTreatmentDTO(String diseaseName, String cropType) {
         if (diseaseName == null) return null;
         Treatment t = treatmentRepository
-            .findByDiseaseNameIgnoreCaseAndCropTypeIgnoreCase(diseaseName, cropType != null ? cropType : "")
-            .or(() -> treatmentRepository.findByDiseaseNameIgnoreCase(diseaseName)).orElse(null);
+            .findByDiseaseNameIgnoreCaseAndCropTypeIgnoreCase(
+                diseaseName, cropType != null ? cropType : "")
+            .or(() -> treatmentRepository.findByDiseaseNameIgnoreCase(diseaseName))
+            .orElse(null);
         if (t == null) return null;
         TreatmentDTO dto = new TreatmentDTO();
-        dto.setId(t.getId()); dto.setOrganicRemedy(t.getOrganicRemedy());
-        dto.setChemicalPesticide(t.getChemicalPesticide()); dto.setPesticideDosage(t.getPesticideDosage());
-        dto.setPreventiveMeasures(t.getPreventiveMeasures()); dto.setAiGenerated(false);
+        dto.setId(t.getId());
+        dto.setOrganicRemedy(t.getOrganicRemedy());
+        dto.setChemicalPesticide(t.getChemicalPesticide());
+        dto.setPesticideDosage(t.getPesticideDosage());
+        dto.setPreventiveMeasures(t.getPreventiveMeasures());
+        dto.setAiGenerated(false);
         return dto;
     }
 
     private DetectionDTO toDTO(Detection d, TreatmentDTO t) {
         DetectionDTO dto = new DetectionDTO();
-        dto.setId(d.getId()); dto.setImageUrl(d.getImageUrl()); dto.setCropType(d.getCropType());
-        dto.setDiseaseName(d.getDiseaseName()); dto.setDiseaseCategory(d.getDiseaseCategory());
-        dto.setDescription(d.getDescription()); dto.setConfidence(d.getConfidence());
-        dto.setSeverity(d.getSeverity()); dto.setHealthScore(d.getHealthScore());
+        dto.setId(d.getId()); dto.setImageUrl(d.getImageUrl());
+        dto.setCropType(d.getCropType()); dto.setDiseaseName(d.getDiseaseName());
+        dto.setDiseaseCategory(d.getDiseaseCategory());
+        dto.setDiseaseType(d.getDiseaseType());
+        dto.setDescription(d.getDescription());
+        dto.setSymptoms(d.getSymptoms());
+        dto.setConfidence(d.getConfidence()); dto.setSeverity(d.getSeverity());
+        dto.setHealthScore(d.getHealthScore());
         dto.setStatus(d.getStatus() != null ? d.getStatus().name() : null);
         dto.setCreatedAt(d.getCreatedAt()); dto.setTreatment(t);
         return dto;
     }
 
-    private String blankToNull(String s) { return (s == null || s.isBlank()) ? null : s; }
+    private String blankToNull(String s) {
+        return (s == null || s.isBlank()) ? null : s;
+    }
 }
